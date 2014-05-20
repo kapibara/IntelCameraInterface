@@ -28,6 +28,18 @@ private:
 };
 
 
+struct IntelCameraCalibration{
+    float color_fx;
+    float color_fy;
+    float color_cx;
+    float color_cy;
+
+    float depth_fx;
+    float depth_fy;
+    float depth_cx;
+    float depth_cy;
+};
+
 /*wrapper class for Intel camera*/
 
 class IntelVideoSource
@@ -37,10 +49,19 @@ class IntelVideoSource
 public:
     enum ImageType{
         IMAGE_RGB = 0x01,
-        IMAGE_DEPTH = 0x02
+        IMAGE_DEPTH = 0x02,
+        IMAGE_CONFIDENCE = 0x03,
+        IMAGE_UV = 0x04,
+        IMAGE_VERTICES = 0x05
     };
 
-    IntelVideoSource();
+    enum DepthProfile{
+        PROFILE_DEPTH = 0x01,
+        PROFILE_VERTICES = 0x02
+    };
+
+
+    IntelVideoSource(DepthProfile profileType = IntelVideoSource::PROFILE_DEPTH);
     IntelVideoSource(const PXCImage::ImageInfo &DProfile,const PXCImage::ImageInfo &CProfile);
     ~IntelVideoSource();
 
@@ -51,8 +72,10 @@ public:
     int width(ImageType type);
     int height(ImageType type);
 
+    IntelCameraCalibration getCalibration();
+
     /*that is blocking call!*/
-    bool retrieve(unsigned char *buffer,ImageType imgType, int timeout=PXCScheduler::SyncPoint::TIMEOUT_INFINITE);
+    bool retrieve(unsigned char *buffer[], ImageType imgType, int timeout=PXCScheduler::SyncPoint::TIMEOUT_INFINITE);
 
     int expectedBufferSize(ImageType type);
 
@@ -69,8 +92,7 @@ private:
 
     bool isOpened_;
 
-    void copyToRGB24(const PXCImage::ImageData &data, int imwidth, int imheight, unsigned char *buffer);
-    void copyToDepth(const PXCImage::ImageData &data, int imwidth, int imheight, unsigned char *buffer);
+    void copyToBuffer(const PXCImage::ImageData &data, ImageType type, unsigned char *buffer);
 
     PXCSmartPtr<PXCCapture::VideoStream> RGBStream_;
     PXCSmartPtr<PXCCapture::VideoStream> DStream_;
@@ -81,6 +103,8 @@ private:
     PXCImage::ImageInfo curDProfile_,curCProfile_;
 
     pxcStatus sts_; // status of the last operation
+
+    IntelCameraCalibration calib_;
 };
 
 #endif // INTELVIDEOSOURCE_H

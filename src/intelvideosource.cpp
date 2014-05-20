@@ -1,10 +1,17 @@
 #include "intelvideosource.h"
 
-IntelVideoSource::IntelVideoSource()
+#include <iostream>
+
+IntelVideoSource::IntelVideoSource(DepthProfile profileType)
 {
+
     PXCImage::ImageInfo dprofile ={ 320, //width
                                     240, //height
                                     PXCImage::COLOR_FORMAT_DEPTH};
+
+    if(profileType!=IntelVideoSource::PROFILE_DEPTH){
+        dprofile.format = PXCImage::COLOR_FORMAT_VERTICES;
+    }
 
     PXCImage::ImageInfo cprofile = { 640, //width
                                      480, //height
@@ -40,6 +47,8 @@ int IntelVideoSource::width(ImageType type)
     case IntelVideoSource::IMAGE_RGB:
        return curCProfile_.width;
     case IntelVideoSource::IMAGE_DEPTH:
+    case IntelVideoSource::IMAGE_CONFIDENCE:
+    case IntelVideoSource::IMAGE_UV:
         return curDProfile_.width;
     default:
         return -1;
@@ -53,6 +62,8 @@ int IntelVideoSource::height(ImageType type)
     case IntelVideoSource::IMAGE_RGB:
         return curCProfile_.height;
     case IntelVideoSource::IMAGE_DEPTH:
+    case IntelVideoSource::IMAGE_CONFIDENCE:
+    case IntelVideoSource::IMAGE_UV:
         return curDProfile_.height;
     default:
         return -1;
@@ -81,6 +92,18 @@ bool IntelVideoSource::open(){
     sts_ = capture->CreateDevice(0,&camera);
     if (!isOk()){
         throw IntelCameraException(sts_,"Could not retrieve the first device");
+    }
+
+
+    //sts_ = camera->SetProperty(PXCCapture::Device::PROPERTY_DEPTH_SMOOTHING,true);
+    //if (!isOk()){
+    //    throw IntelCameraException(sts_,"Could not turn off depth smoothing");
+    //}
+
+    pxcF32 toReturn;
+    sts_ = camera->QueryProperty(PXCCapture::Device::PROPERTY_DEPTH_LOW_CONFIDENCE_VALUE,&toReturn);
+    if (isOk()){
+        std::cout << "Confidence value: " << (float)toReturn << std::endl;
     }
 
     PXCCapture::Device::StreamInfo sinfo;
@@ -117,6 +140,36 @@ bool IntelVideoSource::open(){
         if (!setProfile(DStream_,curDProfile_))
             throw IntelCameraException((pxcStatus)-1,"Could not set depth profile");
 
+        /*get calibration parameters and print them*/
+        PXCPointF32 calib;
+        sts_ = camera->QueryPropertyAsPoint(PXCCapture::Device::PROPERTY_DEPTH_FOCAL_LENGTH,&calib);
+        if(isOk()){
+            std::cout << "depth focal length: (" << calib.x << ";" << calib.y << ")" << std::endl;
+            calib_.depth_fx = calib.x;
+            calib_.depth_fy = calib.y;
+        }
+
+        sts_ = camera->QueryPropertyAsPoint(PXCCapture::Device::PROPERTY_DEPTH_PRINCIPAL_POINT,&calib);
+        if(isOk()){
+            std::cout << "depth principal point: (" << calib.x << ";" << calib.y << ")" << std::endl;
+            calib_.depth_cx = calib.x;
+            calib_.depth_cy = calib.y;
+        }
+
+        sts_ = camera->QueryPropertyAsPoint(PXCCapture::Device::PROPERTY_COLOR_FOCAL_LENGTH,&calib);
+        if(isOk()){
+            std::cout << "color focal length: (" << calib.x << ";" << calib.y << ")" << std::endl;
+            calib_.color_fx = calib.x;
+            calib_.color_fy = calib.y;
+        }
+
+        sts_ = camera->QueryPropertyAsPoint(PXCCapture::Device::PROPERTY_COLOR_PRINCIPAL_POINT,&calib);
+        if(isOk()){
+            std::cout << "color principal point: (" << calib.x << ";" << calib.y << ")" << std::endl;
+            calib_.color_cx = calib.x;
+            calib_.color_cy = calib.y;
+        }
+
     }
     else{
         throw IntelCameraException((pxcStatus)-1,"Could not locate color or depth stream");
@@ -141,10 +194,12 @@ bool IntelVideoSource::close(){
 bool IntelVideoSource::setProfile(PXCSmartPtr<PXCCapture::VideoStream> &stream, const PXCImage::ImageInfo &info)
 {
     PXCCapture::VideoStream::ProfileInfo pinfo;
+
     bool isSet = false;
 
     for(int i=0; ;i++){
         sts_ = stream->QueryProfile(i,&pinfo);
+
         if (!isOk()) break;
 
         if (pinfo.imageInfo.width == info.width &&
@@ -163,25 +218,43 @@ bool IntelVideoSource::setProfile(PXCSmartPtr<PXCCapture::VideoStream> &stream, 
     return isSet;
 }
 
+/*this is for "real" images*/
 int IntelVideoSource::sizeInBytes(PXCImage::ColorFormat format){
     switch(format){
     case PXCImage::COLOR_FORMAT_DEPTH:
-        return 2;
+        return sizeof(short);
     case PXCImage::COLOR_FORMAT_RGB24:
         return 3;
     case PXCImage::COLOR_FORMAT_RGB32:
-        return 4;
+        return sizeof(int);
+    case PXCImage::COLOR_FORMAT_VERTICES:
+        return 3*sizeof(int);
     default:
         return -1;
     }
 }
 
+/*this is for all possible buffer types*/
 int IntelVideoSource::sizeInBytes(ImageType type){
     switch(type){
-    case IMAGE_DEPTH:
+    //16bit integer
+    case IntelVideoSource::IMAGE_DEPTH:
+    case IntelVideoSource::IMAGE_CONFIDENCE:
         return sizeInBytes(curDProfile_.format);
-    case IMAGE_RGB:
+        break;
+    case IntelVideoSource::IMAGE_RGB:
         return sizeInBytes(curCProfile_.format);
+        break;
+    //32bit float
+    case IntelVideoSource::IMAGE_UV:
+        return sizeof(float);
+        break;
+    case IntelVideoSource::IMAGE_VERTICES:
+        if (curDProfile_.format!=PXCImage::COLOR_FORMAT_VERTICES){
+            return -1;
+        }
+        return sizeInBytes(curDProfile_.format);
+        break;
     default:
         return -1;
     }
@@ -190,29 +263,49 @@ int IntelVideoSource::sizeInBytes(ImageType type){
 int IntelVideoSource::expectedBufferSize(ImageType type){
     switch(type){
     case IntelVideoSource::IMAGE_RGB:
-        return curCProfile_.width*curCProfile_.height*sizeInBytes(curCProfile_.format);
+        return curCProfile_.width*curCProfile_.height*sizeInBytes(IntelVideoSource::IMAGE_RGB);
         break;
     case IntelVideoSource::IMAGE_DEPTH:
-        return curDProfile_.width*curDProfile_.height*sizeInBytes(curDProfile_.format);
+        return curDProfile_.width*curDProfile_.height*sizeInBytes(IntelVideoSource::IMAGE_DEPTH);
+        break;
+    case IntelVideoSource::IMAGE_CONFIDENCE:
+        return curDProfile_.width*curDProfile_.height*sizeInBytes(IntelVideoSource::IMAGE_CONFIDENCE);
+        break;
+    case IntelVideoSource::IMAGE_UV:
+        //2 coordinates (x,y)
+        return 2*curDProfile_.width*curDProfile_.height*sizeInBytes(IntelVideoSource::IMAGE_UV);
+        break;
+     case IntelVideoSource::IMAGE_VERTICES:
+        return curDProfile_.width*curDProfile_.height*sizeInBytes(IntelVideoSource::IMAGE_VERTICES);
         break;
     default:
         return -1;
     }
 }
 
-void IntelVideoSource::copyToRGB24(const PXCImage::ImageData &data, int imwidth, int imheight, unsigned char *buffer)
+void IntelVideoSource::copyToBuffer(const PXCImage::ImageData &data, ImageType type, unsigned char *buffer)
 {
-    int copyLength = expectedBufferSize(IMAGE_RGB);
-    memcpy(buffer,data.planes[0],copyLength);
+    int copyLength = expectedBufferSize(type);
+    switch(type){
+    case IntelVideoSource::IMAGE_RGB:
+    case IntelVideoSource::IMAGE_DEPTH:
+        memcpy(buffer,data.planes[0],copyLength);
+        break;
+    case IntelVideoSource::IMAGE_CONFIDENCE:
+        memcpy(buffer,data.planes[1],copyLength);
+        break;
+    case IntelVideoSource::IMAGE_UV:
+        memcpy(buffer,data.planes[2],copyLength);
+        break;
+    case IntelVideoSource::IMAGE_VERTICES:
+        memcpy(buffer,data.planes[0],copyLength);
+        break;
+    default:
+        ;
+    };
 }
 
-void IntelVideoSource::copyToDepth(const PXCImage::ImageData &data, int imwidth, int imheight, unsigned char *buffer)
-{
-    int copyLength = expectedBufferSize(IMAGE_DEPTH);
-    memcpy(buffer,data.planes[0],copyLength);
-}
-
-bool IntelVideoSource::retrieve(unsigned char *buffer, ImageType type, int timeout){
+bool IntelVideoSource::retrieve(unsigned char *buffer[], ImageType type, int timeout){
     PXCSmartPtr<PXCImage> image;
     PXCImage::ImageData data;
 
@@ -221,41 +314,38 @@ bool IntelVideoSource::retrieve(unsigned char *buffer, ImageType type, int timeo
         sts_ = RGBStream_->ReadStreamAsync(&image,&sps_);
         if (!isOk()) throw IntelCameraException(sts_,"Could not execute async read on the color stream");
 
-        sts_ = sps_->Synchronize(timeout);
-        if (!isOk()) throw IntelCameraException(sts_,"Timeout waiting for data from RGB stream");
-
-        sts_ = image->AcquireAccess(PXCImage::ACCESS_READ,&data);
-        if (!isOk()) throw IntelCameraException(sts_,"Error getting access to the RGB image");
-
-        copyToRGB24(data,curCProfile_.width,curCProfile_.height,buffer);
-
-        image->ReleaseAccess(&data);
-
-        image.ReleaseRef();
-        sps_.ReleaseRef();
-
         break;
     case IntelVideoSource::IMAGE_DEPTH:
+    case IntelVideoSource::IMAGE_CONFIDENCE:
+    case IntelVideoSource::IMAGE_UV:
         sts_ = DStream_->ReadStreamAsync(&image,&sps_);
         if (!isOk()) throw IntelCameraException(sts_,"Could not execute async read on the depth stream");
-
-        sts_ = sps_->Synchronize(timeout);
-        if (!isOk()) throw IntelCameraException(sts_,"Timeout waiting for data from depth stream");
-
-        sts_ = image->AcquireAccess(PXCImage::ACCESS_READ,&data);
-        if (!isOk()) throw IntelCameraException(sts_,"Error getting access to the depth image");
-
-        copyToDepth(data,curDProfile_.width,curDProfile_.height,buffer);
-
-        image->ReleaseAccess(&data);
-
-        image.ReleaseRef();
-        sps_.ReleaseRef();
 
         break;
     default:
         return false;
+    };
+
+
+
+    sts_ = sps_->Synchronize(timeout);
+    if (!isOk()) throw IntelCameraException(sts_,"Timeout waiting for data from RGB stream");
+
+    sts_ = image->AcquireAccess(PXCImage::ACCESS_READ,&data);
+    if (!isOk()) throw IntelCameraException(sts_,"Error getting access to the RGB image");
+
+    if (type == IntelVideoSource::IMAGE_DEPTH){
+        copyToBuffer(data,IntelVideoSource::IMAGE_DEPTH,buffer[0]);
+        copyToBuffer(data,IntelVideoSource::IMAGE_CONFIDENCE,buffer[1]);
+        copyToBuffer(data,IntelVideoSource::IMAGE_UV,buffer[2]);
+    }else{
+        copyToBuffer(data,type,buffer[0]);
     }
+
+    image->ReleaseAccess(&data);
+
+    image.ReleaseRef();
+    sps_.ReleaseRef();
 
     return true;
 }
